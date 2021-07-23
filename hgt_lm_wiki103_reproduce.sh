@@ -100,7 +100,7 @@ CUDA_VISIBLE_DEVICES=5 fairseq-eval-lm $DATA_BIN \
     --model-overrides "{'orig_prob_ratio': $alpha, 'quantizer_path': '${QUANTIZER}', 'max_target_positions': $n }" \
     --gen-subset $subset \
     --dstore-mmap $DATA_BIN \
-    --save-knnlm-dstore --dstore-fp16 --knn-keytype "gcn_feat" --first 20
+    --save-knnlm-dstore --dstore-fp16 --knn-keytype "gcn_feat"
 done
 
 
