@@ -42,6 +42,8 @@ def main():
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument('--chunk-size', default=1000000, type=int,
                         help='can only load a certain amount of data to memory at a time.')
+    parser.add_argument('--max-train', default=1000000, type=int,
+                        help='amount of data used for training.')
     parser.add_argument('--use-gpu', default=False, action='store_true',
                         help='if true, use gpu for training')
     parser.add_argument('--workers', type=int, default=1, help='number of cpu')
@@ -98,7 +100,7 @@ def build(dstore_dir, args):
 
         if args.overwrite or not index_builder.exists():
             index_builder.build(index_type=args.index_type, seed=args.seed, chunk_size=args.chunk_size,
-                                overwrite=args.overwrite)
+                                overwrite=args.overwrite, max_train=args.max_train)
     except Exception as e:
         LOGGING.error(f"Error at building index for {dstore_dir}", exc_info=1)
 

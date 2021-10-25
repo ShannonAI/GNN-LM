@@ -12,12 +12,15 @@ from fairseq.models import (
 from fairseq.models.transformer import (
     Embedding,
     TransformerDecoder,
+    TokenGraphTransformerDecoder
 )
 from fairseq.modules import (
     AdaptiveInput,
     CharacterTokenEmbedder,
 )
 
+
+import torch
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
@@ -115,6 +118,26 @@ class TransformerLanguageModel(FairseqLanguageModel):
                             help='add layernorm to embedding')
         parser.add_argument('--no-scale-embedding', action='store_true',
                             help='if True, dont scale embeddings')
+
+        # for graph transformer
+        parser.add_argument("--quantizer_path", type=str, default="",
+                            help="path to tgt faiss quantizer")
+        parser.add_argument("--graph_layer", type=int, default=0,
+                            help="graph model layer")
+        parser.add_argument("--decoder_gcn_dim", type=int, default=1024,
+                            help="graph model layer")
+        parser.add_argument('--freeze', action='store_true', default=False,
+                            help='if set, freeze origin transformer decoder')
+        parser.add_argument('--short-cut', default=False, action='store_true',
+                            help='if true, directly use transformer decoder feature without passing it to '
+                                 'graph. This feature is useful when debugging')
+        parser.add_argument("--orig_prob_ratio", type=float, default=0.0,
+                            help="if larger than 0.0, weight average origin transformer decoder and hgt decoder prob")
+
+        # to be compatible with pretrained transformer-xl
+        parser.add_argument('--add-bias', action='store_true', default=False,
+                            help='if True, add bias to last out projection layer')
+
         # fmt: on
 
     @classmethod
@@ -154,7 +177,14 @@ class TransformerLanguageModel(FairseqLanguageModel):
 
         decoder = TransformerDecoder(
             args, task.target_dictionary, embed_tokens, no_encoder_attn=True,
+        ) if args.graph_layer == 0 else TokenGraphTransformerDecoder(
+            args, task.target_dictionary, embed_tokens, no_encoder_attn=True,
         )
+        if args.freeze:
+            for name, param in decoder.named_parameters():
+                if "hgt" not in name:
+                    param.requires_grad = False
+
         return TransformerLanguageModel(decoder)
 
 
@@ -287,5 +317,17 @@ def transformer_lm_gpt2_big(args):
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 25)
     args.dropout = getattr(args, 'dropout', 0.1)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.activation_fn = getattr(args, 'activation_fn', 'gelu')
+    base_lm_architecture(args)
+
+
+@register_model_architecture('transformer_lm', 'transformer_lm_enwik8')
+def transformer_lm_enwik8(args):
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
+    args.decoder_layers = getattr(args, 'decoder_layers', 24)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
+    args.dropout = getattr(args, 'dropout', 0.15)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.15)
     args.activation_fn = getattr(args, 'activation_fn', 'gelu')
     base_lm_architecture(args)

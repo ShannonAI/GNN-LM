@@ -491,6 +491,13 @@ def add_eval_lm_args(parser):
                        help='save keys for the knnlm datastore')
     group.add_argument('--dstore-mmap', default=None, type=str,
                        help='If saving knnlm dstore, save keys and values to this file')
+    group.add_argument('--first', default=0, type=int,
+                       help='Use only first n samples, useful when debugging')
+    group.add_argument('--temperature', default=1.0, type=float,
+                       help='temperature when calculating knn probs')
+    group.add_argument("--output-knn-recall", default=False, action="store_true",
+                       help="if true, print knn recall of each token.")
+
     # fmt: on
 
 

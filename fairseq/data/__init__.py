@@ -23,7 +23,7 @@ from .list_dataset import ListDataset
 from .lm_context_window_dataset import LMContextWindowDataset
 from .lru_cache_dataset import LRUCacheDataset
 from .mask_tokens_dataset import MaskTokensDataset
-from .monolingual_dataset import MonolingualDataset
+from .monolingual_dataset import MonolingualDataset, GraphMonolingualDataset
 from .multi_corpus_sampled_dataset import MultiCorpusSampledDataset
 from .nested_dictionary_dataset import NestedDictionaryDataset
 from .noising import NoisingDataset
@@ -42,10 +42,12 @@ from .sharded_dataset import ShardedDataset
 from .sort_dataset import SortDataset
 from .strip_token_dataset import StripTokenDataset
 from .subsample_dataset import SubsampleDataset
-from .token_block_dataset import TokenBlockDataset
+from .token_block_dataset import TokenBlockDataset, GraphTokenBlockDataset
 from .transform_eos_dataset import TransformEosDataset
 from .transform_eos_lang_pair_dataset import TransformEosLangPairDataset
-from .truncate_dataset import TruncateDataset
+from .truncate_dataset import TruncateDataset, TruncDataset
+
+from .mmap_dataset import MmapDataset
 
 from .iterators import (
     CountingIterator,
@@ -106,4 +108,9 @@ __all__ = [
     'TransformEosLangPairDataset',
     'TruncateDataset',
     'TruncatedDictionary',
+
+    'GraphTokenBlockDataset',
+    'GraphMonolingualDataset',
+    'MmapDataset',
+    'TruncDataset'
 ]

@@ -32,7 +32,9 @@ def main():
     parser.add_argument("--candidate_subset", type=str, default="train", help="find knn from which subset")
     parser.add_argument("--cuda", default=-1, type=int, help="cuda device")
     parser.add_argument("--nprobe", type=int, default=32, help="nprobe for faiss approximate knn search")
+    parser.add_argument("--efsearch", type=int, default=8, help="efsearch for faiss approximate knn search")
     parser.add_argument("--k", type=int, default=32, help="find k nearest neighbors")
+    parser.add_argument("--bsz", type=int, default=1024, help="batch size")
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -45,18 +47,19 @@ def main():
         index_file=os.path.join(dstore_path(data_dir, args.candidate_subset), "faiss_store.cosine"),
         dstore_dir=ds_dir,
         no_load_keys=True, use_memory=True, cuda=args.cuda,
-        probe=args.nprobe)
+        probe=args.nprobe,
+        efsearch=args.efsearch
+    )
     dstore_size = ds.dstore_size
 
     neighbor_file = neighbor_path(data_dir, subset, args.k)
     neighbor_array = np.memmap(neighbor_file, mode="w+", shape=(dstore_size, args.k), dtype=np.int64)
 
-    batch = 8192
     start = 0
 
     pbar = tqdm(total=dstore_size)
     while start < dstore_size:
-        end = min(start+batch, dstore_size)
+        end = min(start+args.bsz, dstore_size)
         batch_query = keys[start: end].astype(np.float32)
 
         knn_dists, knns = knn_model.get_knns(queries=batch_query, k=args.k)

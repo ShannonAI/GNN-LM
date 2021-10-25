@@ -78,6 +78,18 @@ def main(args, init_distributed=False):
         args.max_sentences,
     ))
 
+    if args.pretrained_part:
+        if not os.path.exists(args.pretrained_part):
+            raise FileNotFoundError(f"pretrained part file {args.pretrained_part} does not exist.")
+        logger.info(
+            "use pretrained part ckpt at {}".format(args.pretrained_part)
+        )
+        state = checkpoint_utils.load_checkpoint_to_cpu(args.pretrained_part)
+
+        trainer.get_model().load_state_dict(
+            state["model"], strict=False, args=args,
+        )
+
     # Load the latest checkpoint if one is available and restore the
     # corresponding train iterator
     extra_state, epoch_itr = checkpoint_utils.load_checkpoint(args, trainer)
@@ -272,6 +284,10 @@ def distributed_main(i, args, start_rank=0):
 
 def cli_main(modify_parser=None):
     parser = options.get_training_parser()
+    parser.add_argument("--pretrained_part", type=str, default="",
+                        help="load pretrained ckpt unstrictly. This is useful when you only want to initialize part"
+                             "of model using paramerters from another different model")
+
     args = options.parse_args_and_arch(parser, modify_parser=modify_parser)
 
     if args.distributed_init_method is None:

@@ -194,8 +194,12 @@ class GraphTokenBlockDataset(TokenBlockDataset):
         precompute_feats: np.array # [corpus_len, d]
         neighbor_tokens: np.array # [neighbor_corpus_len, 1]
         quant_neighbor_feats: np.array # [neighbor_corpus_len, d]
-        neighbor_context: int, add neighbor context to graph
-        invalid_neighbor_context: invalid neighbor context, useful in training to prevent data leakage
+        neighbor_context: int or tuple of int, add neighbor context to graph.
+            if is int, left context and righ context are the same. if is an tuple of int,
+            is (left_context, right_context)
+        invalid_neighbor_context: invalid neighbor context, useful in training to prevent data leakage,
+        context_window: int, defaults to 0. provide more context for evaluation
+        intra_context: int, intra context length when adding autoregressive edges
     """
     def __init__(
         self,
@@ -212,7 +216,10 @@ class GraphTokenBlockDataset(TokenBlockDataset):
         quant_neighbor_feats=None,
         neighbor_context=1,
         precompute_feats=None,
-        invalid_neighbor_context=0
+        invalid_neighbor_context=0,
+        context_window=0,
+        intra_context=0,
+        deprecated=False
     ):
         super(GraphTokenBlockDataset, self).__init__(dataset, sizes, block_size, pad, eos,
                                                      break_mode, include_targets, document_sep_len)
@@ -222,45 +229,96 @@ class GraphTokenBlockDataset(TokenBlockDataset):
         self.cum_sizes = np.insert(cum_sizes, 0, 0)
         self.k = self.neighbor_offsets.shape[-1]
         self.quant_neighbor_feats = quant_neighbor_feats
-        self.neighbor_context = neighbor_context
+        if isinstance(neighbor_context, int):
+            self.left_neighbor_context = neighbor_context
+            self.right_neighbor_context = neighbor_context
+        else:
+            self.left_neighbor_context, self.right_neighbor_context = neighbor_context
+
         self.precompute_feats = precompute_feats
         self.block_size = block_size
         self.invalid_neighbor_context = invalid_neighbor_context
-
+        self.context_window = context_window
         assert self.include_targets
+        self.max_intra_context = intra_context
+        self.deprecated = deprecated
+
+    def get_basic_info(self, index):
+        if self.context_window == 0 or index == 0:
+            start_ds_idx, start_offset, end_ds_idx = self.block_to_dataset_index[index]
+
+            buffer = torch.cat(
+                [self.dataset[idx] for idx in range(start_ds_idx, end_ds_idx + 1)]
+            )
+            offsets = torch.cat(
+                [self.cum_sizes[idx] + torch.arange(0, len(self.dataset[idx])) for idx in
+                 range(start_ds_idx, end_ds_idx + 1)]
+            )
+
+            slice_s, slice_e = self.slice_indices[index]
+            length = slice_e - slice_s
+            s, e = start_offset, start_offset + length
+            item = buffer[s:e]
+            offsets = offsets[s: e]
+            return buffer, item, offsets, s, e, 0
+        else:
+            start_ds_idx, start_offset, end_ds_idx = self.block_to_dataset_index[index]
+            prev_start_ds_idx, prev_start_offset, prev_end_ds_idx = self.block_to_dataset_index[index-1]
+            assert prev_end_ds_idx == start_ds_idx or prev_end_ds_idx == start_ds_idx-1
+            concat_buffer = torch.cat(
+                [self.dataset[idx] for idx in range(prev_start_ds_idx, end_ds_idx + 1)]
+            )
+            concat_offsets = torch.cat(
+                [self.cum_sizes[idx] + torch.arange(0, len(self.dataset[idx])) for idx in
+                 range(prev_start_ds_idx, end_ds_idx + 1)]
+            )
+
+            slice_s, slice_e = self.slice_indices[index]
+            prev_slice_s, prev_slice_e = self.slice_indices[index-1]
+            length = slice_e - slice_s
+            s, e = start_offset, start_offset + length  # origin s, origin_e, offset based on cur block
+            ds_offset = self.cum_sizes[start_ds_idx] - self.cum_sizes[prev_start_ds_idx]
+            s, e = s + ds_offset, e + ds_offset  # origin s, origin_e, offset based on prev block
+            context_s = max(0, s-self.context_window)
+            item = concat_buffer[context_s:e]
+            concat_offsets = concat_offsets[context_s: e]
+            return concat_buffer, item, concat_offsets, context_s, e, s-context_s
 
     def __getitem__(self, index):
-        start_ds_idx, start_offset, end_ds_idx = self.block_to_dataset_index[index]
+        # start_ds_idx, start_offset, end_ds_idx = self.block_to_dataset_index[index]
+        #
+        # buffer = torch.cat(
+        #     [self.dataset[idx] for idx in range(start_ds_idx, end_ds_idx + 1)]
+        # )
+        # offsets = torch.cat(
+        #     [self.cum_sizes[idx] + torch.arange(0, len(self.dataset[idx])) for idx in range(start_ds_idx, end_ds_idx + 1)]
+        # )
+        #
+        # slice_s, slice_e = self.slice_indices[index]
+        # length = slice_e - slice_s
+        # s, e = start_offset, start_offset + length
+        # item = buffer[s:e]
+        # offsets = offsets[s: e]
+        buffer, item, offsets, s, e, loss_start_idx = self.get_basic_info(index)
 
-        buffer = torch.cat(
-            [self.dataset[idx] for idx in range(start_ds_idx, end_ds_idx + 1)]
-        )
-        offsets = torch.cat(
-            [self.cum_sizes[idx] + torch.arange(0, len(self.dataset[idx])) for idx in range(start_ds_idx, end_ds_idx + 1)]
-        )
-
-        slice_s, slice_e = self.slice_indices[index]
-        length = slice_e - slice_s
-        s, e = start_offset, start_offset + length
-        item = buffer[s:e]
-        offsets = offsets[s: e]
         if self.include_targets:
+            graph_func = self.deprecated_build_graph if self.deprecated else self.new_build_graph
             # *target* is the original sentence (=item)
             # *source* is shifted right by 1 (maybe left-padded with eos)
             # *past_target* is shifted right by 2 (left-padded as needed)
             neighbor_idxs = self.neighbor_offsets[offsets]
             if s == 0:
-                source = torch.cat([item.new([self.eos]), buffer[0 : e - 1]])
+                source = torch.cat([item.new([self.eos]), buffer[0: e - 1]])
                 # neighbor_idxs = np.concatenate([item.new([-1]*self.k).view(1, self.k),
                 #                                 self.neighbor_offsets[offsets[0: e - 1]]])
-                graph = self.build_graph(source, offsets, neighbor_idxs, item)
+                graph = graph_func(source, offsets, neighbor_idxs, item)
                 past_target = torch.cat(
                     [item.new([self.pad, self.eos]), buffer[0 : e - 2]]
                 )
             else:
                 source = buffer[s - 1 : e - 1]
                 # neighbor_idxs = self.neighbor_offsets[offsets[s - 1: e - 1]]
-                graph = self.build_graph(source, offsets, neighbor_idxs, item)
+                graph = graph_func(source, offsets, neighbor_idxs, item)
                 if s == 1:
                     past_target = torch.cat([item.new([self.eos]), buffer[0 : e - 2]])
                 else:
@@ -270,14 +328,14 @@ class GraphTokenBlockDataset(TokenBlockDataset):
                 tgt_feats = torch.from_numpy(self.precompute_feats[offsets].astype(np.float32))
                 graph.nodes["tgt"].data["h"] = tgt_feats
 
-            return source, item, past_target, graph
+            return source, item, past_target, graph, torch.LongTensor([loss_start_idx])
 
         return item
 
     def __len__(self):
         return len(self.slice_indices)
 
-    def build_graph(self, source: torch.Tensor, offsets: np.array, neighbor_idxs:np.array, target: torch.Tensor):
+    def new_build_graph(self, source: torch.Tensor, offsets: np.array, neighbor_idxs:np.array, target: torch.Tensor):
         """
         build dgl graph
         Args:
@@ -291,58 +349,65 @@ class GraphTokenBlockDataset(TokenBlockDataset):
         tgt2ntgt = [[], []]
         ntgt2ntgt = [[], []]
         ntgt_feats = []
+        ntgt_labels = []
 
-        for tgt_idx in range(len(source)):
+        for tgt_idx in range(len(target)):
             # todo: merge same nodes with regard to same tgt_idx
             neighbors = neighbor_idxs[tgt_idx]  # [k]
             for offset in neighbors:
-                cur_ntgt_ids = []
-                cur_ntgt_offsets = []
                 if offset == -1:
                     continue
                 # ignore inner-context tokens in training dataset todo try auto-regressive ignore
                 if abs(offsets[tgt_idx] - offset) < self.invalid_neighbor_context:
-                # if self.training and offsets[tgt_idx] > offset - self.block_size:
                     continue
+                cur_ntgt_ids = []
+                cur_ntgt_offsets = []
 
                 # update ntgt ids/labels/feats
                 cur_ntgt_ids.append(ntgt_id)
                 cur_ntgt_offsets.append(offset)
-                ntgt_feats.append(self.quant_neighbor_feats[offset])
+                if self.quant_neighbor_feats is not None:
+                    ntgt_feats.append(self.quant_neighbor_feats[offset])
+                ntgt_labels.append(self.neighbor_tokens[offset])
                 tgt2ntgt[0].append(tgt_idx)
                 tgt2ntgt[1].append(ntgt_id)
                 ntgt_id += 1
 
                 # add context ntgt
                 context_offsets = []
-                if self.neighbor_context:
+                if self.left_neighbor_context:
                     # left context
-                    for left_offset in range(max(0, offset-self.neighbor_context), offset):
+                    for left_offset in range(max(0, offset-self.left_neighbor_context), offset):
                         context_offsets.append(left_offset)
+                if self.right_neighbor_context:
                     # right context
-                    for right_offset in range(offset+1, min(len(self.neighbor_tokens),
-                                                            offset + 1 + self.neighbor_context)):
+                    for right_offset in range(offset+1, min(len(self.neighbor_offsets.shape[0]),
+                                                            offset + 1 + self.right_neighbor_context)):
                         context_offsets.append(right_offset)
 
                 for offset in context_offsets:
                     cur_ntgt_ids.append(ntgt_id)
                     cur_ntgt_offsets.append(offset)
                     ntgt_id += 1
-                    ntgt_feats.append(self.quant_neighbor_feats[offset])
+                    if self.quant_neighbor_feats is not None:
+                        ntgt_feats.append(self.quant_neighbor_feats[offset])
+                    ntgt_labels.append(self.neighbor_tokens[offset])
                 cur_ntgt2ntgt = self.build_ntgt_edges(offsets2id={o: ntgt_id for ntgt_id, o in
                                                                   zip(cur_ntgt_ids, cur_ntgt_offsets)},
-                                                      context=self.neighbor_context,
+                                                      context=1,
                                                       bidirect=True)
                 ntgt2ntgt[0].extend(cur_ntgt2ntgt[0])
                 ntgt2ntgt[1].extend(cur_ntgt2ntgt[1])
 
         graph = dgl.heterograph({
-            ('tgt', 'intra', 'tgt'): self.auto_regressive_edges(len(source)),
+            ('tgt', 'intra', 'tgt'): self.auto_regressive_edges(len(source), max_context=self.max_intra_context),
             ('ntgt', 'inter', 'tgt'): (torch.LongTensor(tgt2ntgt[1]), torch.LongTensor(tgt2ntgt[0])),
             ('ntgt', 'intra', 'ntgt'): (torch.LongTensor(ntgt2ntgt[0]), torch.LongTensor(ntgt2ntgt[1])),
         })
-        ntgt_feats = torch.from_numpy(np.stack(ntgt_feats))
-        graph.nodes["ntgt"].data["h"] = ntgt_feats
+        if ntgt_feats:
+            ntgt_feats = torch.from_numpy(np.stack(ntgt_feats))
+            graph.nodes["ntgt"].data["h"] = ntgt_feats
+        graph.nodes["ntgt"].data["labels"] = torch.from_numpy(np.concatenate(ntgt_labels))
 
         return graph
 
@@ -385,13 +450,14 @@ class GraphTokenBlockDataset(TokenBlockDataset):
 
                 # add context ntgt
                 context_offsets = []
-                if self.neighbor_context:
+                if self.left_neighbor_context:
                     # left context
-                    for left_offset in range(max(0, offset-self.neighbor_context), offset):
+                    for left_offset in range(max(0, offset-self.left_neighbor_context), offset):
                         context_offsets.append(left_offset)
+                if self.right_neighbor_context:
                     # right context
-                    for right_offset in range(offset+1, min(len(self.neighbor_offsets),
-                                                            offset + self.neighbor_context)):
+                    for right_offset in range(offset+1, min(len(self.neighbor_tokens),
+                                                            offset + 1 + self.right_neighbor_context)):
                         context_offsets.append(right_offset)
                 for offset in context_offsets:
                     if offset not in offsets2ntgt_id:
@@ -401,12 +467,76 @@ class GraphTokenBlockDataset(TokenBlockDataset):
                         ntgt_feats.append(self.quant_neighbor_feats[offset])
 
         # ntgt->ntgt edges
-        ntgt2ntgt = self.build_ntgt_edges(offsets2ntgt_id, self.neighbor_context, bidirect=True)
+        ntgt2ntgt = self.build_ntgt_edges(offsets2ntgt_id, 1, bidirect=True)
 
         graph = dgl.heterograph({
-            ('tgt', 'intra', 'tgt'): self.auto_regressive_edges(len(source)),
+            ('tgt', 'intra', 'tgt'): self.auto_regressive_edges(len(source), max_context=self.max_intra_context),
             ('ntgt', 'inter', 'tgt'): (torch.LongTensor(tgt2ntgt[1]), torch.LongTensor(tgt2ntgt[0])),
             ('ntgt', 'intra', 'ntgt'): (torch.LongTensor(ntgt2ntgt[0]), torch.LongTensor(ntgt2ntgt[1])),
+        })
+        ntgt_feats = torch.from_numpy(np.stack(ntgt_feats))
+        graph.nodes["ntgt"].data["h"] = ntgt_feats
+
+        return graph
+
+    def build_graph(self, source: torch.Tensor, offsets: np.array, neighbor_idxs:np.array, target: torch.Tensor):
+        """
+        build dgl graph
+        Args:
+            source: source tensor
+            offsets: np.array
+            neighbor_idxs: np.array of shape [len(source), self.k]
+            target: target tensor shifted left by 1
+        """
+
+        offsets2ntgt_id = {}  # map neighbor tgt nodes to node-ids
+        tgt2ntgt = [[], []]
+        ntgt_feats = []
+
+        for tgt_idx in range(len(source)):
+            neighbors = neighbor_idxs[tgt_idx]  # [k]
+            for offset in neighbors:
+                if offset == -1:
+                    continue
+                # ignore inner-context tokens in training dataset
+                if abs(offsets[tgt_idx] - offset) < self.invalid_neighbor_context:
+                    continue
+
+                # update ntgt ids/labels/feats
+                if offset not in offsets2ntgt_id:
+                    ntgt_id = len(offsets2ntgt_id)
+                    offsets2ntgt_id[offset] = ntgt_id
+                    ntgt_feats.append(self.quant_neighbor_feats[offset])
+                else:
+                    ntgt_id = offsets2ntgt_id[offset]
+                tgt2ntgt[0].append(tgt_idx)
+                tgt2ntgt[1].append(ntgt_id)
+
+                # add context ntgt
+                context_offsets = []
+                if self.left_neighbor_context:
+                    # left context
+                    for left_offset in range(max(0, offset-self.left_neighbor_context), offset):
+                        context_offsets.append(left_offset)
+                if self.right_neighbor_context:
+                    # right context
+                    for right_offset in range(offset+1, min(len(self.neighbor_tokens),
+                                                            offset + 1 + self.right_neighbor_context)):
+                        context_offsets.append(right_offset)
+                for offset in context_offsets:
+                    if offset not in offsets2ntgt_id:
+                        ntgt_id = len(offsets2ntgt_id)
+                        offsets2ntgt_id[offset] = ntgt_id
+                        ntgt_feats.append(self.quant_neighbor_feats[offset])
+
+        # ntgt->ntgt edges
+        # ntgt_l2r = self.build_ntgt_edges(offsets2ntgt_id, self.neighbor_context, bidirect=False)
+        ntgt_l2r = self.build_ntgt_edges(offsets2ntgt_id, 1, bidirect=True)  # todo: set it in args
+
+        graph = dgl.heterograph({
+            ('tgt', 'intra', 'tgt'): self.auto_regressive_edges(len(source), max_context=self.max_intra_context),
+            ('ntgt', 'inter', 'tgt'): (torch.LongTensor(tgt2ntgt[1]), torch.LongTensor(tgt2ntgt[0])),
+            ('ntgt', 'intra', 'ntgt'): (torch.LongTensor(ntgt_l2r[1]), torch.LongTensor(ntgt_l2r[0])),
         })
         ntgt_feats = torch.from_numpy(np.stack(ntgt_feats))
         graph.nodes["ntgt"].data["h"] = ntgt_feats
@@ -446,13 +576,21 @@ class GraphTokenBlockDataset(TokenBlockDataset):
                     tgt.append(tgt_node[0])
             start += 1
         if bidirect:
-            src, tgt = src + tgt, tgt + src
+            l = len(src)
+            for idx in range(l):
+                s, t = src[idx], tgt[idx]
+                if s != t:
+                    src.append(t)
+                    tgt.append(s)
         return src, tgt
 
     @staticmethod
     @lru_cache(maxsize=-1)
-    def auto_regressive_edges(len: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        auto_regressive_mask = torch.triu(torch.ones(len, len))
+    def auto_regressive_edges(length: int, max_context: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+        auto_regressive_mask = torch.triu(torch.ones(length, length, dtype=torch.bool))
+        if max_context:
+            context_mask = ~torch.triu(torch.ones(length, length, dtype=torch.bool), diagonal=max_context)
+            auto_regressive_mask = torch.logical_and(auto_regressive_mask, context_mask)
         us, vs = torch.where(auto_regressive_mask)
         return us, vs
 

@@ -14,12 +14,14 @@ import os
 
 import torch
 import numpy as np
+import json
 
 from fairseq import checkpoint_utils, options, progress_bar, tasks, utils
-from fairseq.data import LMContextWindowDataset
+from fairseq.data import LMContextWindowDataset, TruncDataset
 from fairseq.meters import StopwatchMeter, TimeMeter
 from fairseq.sequence_scorer import SequenceScorer
 from fairseq.knnlm import KNN_Dstore
+from knn.knn_model import KNNModel
 
 
 logging.basicConfig(
@@ -77,7 +79,8 @@ def main(parsed_args):
 
     for arg in vars(parsed_args).keys():
         if arg not in {
-            'self_target', 'future_target', 'past_target', 'tokens_per_sample',
+            'self_target', 'future_target', 'past_target',
+            # 'tokens_per_sample',
             'output_size_dictionary', 'add_bos_token',
         }:
             setattr(args, arg, getattr(parsed_args, arg))
@@ -96,6 +99,13 @@ def main(parsed_args):
             context_window=args.context_window,
             pad_idx=task.source_dictionary.pad(),
         )
+
+    if args.save_knnlm_dstore:
+        dstore_size = dataset.dataset.dataset.dataset.sizes.sum() if isinstance(dataset, LMContextWindowDataset) else dataset.dataset.dataset.sizes.sum()
+
+    if args.first > 0:
+        dataset = TruncDataset(dataset, args.first)
+
     logger.info('{} {} {} examples'.format(args.data, args.gen_subset, len(dataset)))
 
     # Optimize ensemble for generation and set the source and dest dicts on the model (required by scorer)
@@ -150,21 +160,49 @@ def main(parsed_args):
         raise ValueError("Cannot use knnlm while trying to build the datastore!")
 
     if args.knnlm:
-        knn_dstore = KNN_Dstore(args)
+        # knn_dstore = KNN_Dstore(args)
+        knn_dstore = KNNModel(
+            index_file=args.index_file,
+            dstore_dir=args.dstore_dir,
+            cuda=-1,  # todo: add args
+            k=args.k,
+            no_load_keys=True if "do_not_recomp" in args.knn_sim_func else False,
+            use_memory=True,
+            # metric_type="do_not_recomp_l2" if args.index_file.endswith("l2") else "do_not_recomp_ip"
+            metric_type=args.knn_sim_func
+        )
 
     with progress_bar.build_progress_bar(args, itr) as t:
         wps_meter = TimeMeter()
 
         if args.save_knnlm_dstore:
-            print('keytype being saved:', args.knn_keytype)
+            logger.info(f'keytype being saved: {args.knn_keytype}')
+            info = {
+                "dstore_size": int(dstore_size),
+                "hidden_size": args.decoder_embed_dim,
+                "vocab_size": len(task.target_dictionary),
+                "dstore_fp16": args.dstore_fp16,
+                "val_size": 1
+            }
+            logger.info(f"dstore info: {info}")
+            suffix = "" if not args.knn_keytype else f"-{args.knn_keytype}"
+            save_dir = os.path.join(args.dstore_mmap, f"{args.gen_subset}_dstore{suffix}")
+            os.makedirs(save_dir, exist_ok=True)
+            info_path = os.path.join(save_dir, f"info.json")
+            key_path = os.path.join(save_dir, f"keys.npy")
+            val_path = os.path.join(save_dir, f"vals.npy")
+            json.dump(info, open(info_path, "w"), indent=4, sort_keys=True)
             if args.dstore_fp16:
-                print('Saving fp16')
-                dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float16, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
-                dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int16, mode='w+', shape=(args.dstore_size, 1))
+                dstore_keys = np.memmap(key_path, dtype=np.float16, mode='w+',
+                                        shape=(dstore_size, args.decoder_embed_dim))
             else:
-                print('Saving fp32')
-                dstore_keys = np.memmap(args.dstore_mmap+'_keys.npy', dtype=np.float32, mode='w+', shape=(args.dstore_size, args.decoder_embed_dim))
-                dstore_vals = np.memmap(args.dstore_mmap+'_vals.npy', dtype=np.int, mode='w+', shape=(args.dstore_size, 1))
+                dstore_keys = np.memmap(key_path, dtype=np.float32, mode='w+',
+                                        shape=(dstore_size, args.decoder_embed_dim))
+
+            if args.dstore_fp16 and len(task.target_dictionary) < 2 ** 15:
+                dstore_vals = np.memmap(val_path, dtype=np.int16, mode='w+', shape=(dstore_size, 1))
+            else:
+                dstore_vals = np.memmap(val_path, dtype=np.int32, mode='w+', shape=(dstore_size, 1))
 
         dstore_idx = 0
         for ex_i, sample in enumerate(t):
@@ -175,7 +213,7 @@ def main(parsed_args):
 
             gen_timer.start()
             if args.knnlm:
-                hypos = scorer.generate(models, sample, knn_dstore=knn_dstore)
+                hypos = scorer.generate(models, sample, knn_dstore=knn_dstore, temperature=args.temperature)
             else:
                 hypos = scorer.generate(models, sample)
             gen_timer.stop(sample['ntokens'])
@@ -184,30 +222,33 @@ def main(parsed_args):
                 hypo = hypos_i[0]
                 if args.save_knnlm_dstore:
                     shape = hypo['dstore_keys'].shape
-                    if shape[0] == args.tokens_per_sample:
-                        if dstore_idx + shape[0] > args.dstore_size:
-                            shape = [args.dstore_size - dstore_idx]
-                            hypo['dstore_keys'] = hypo['dstore_keys'][:shape[0]]
-                        if args.dstore_fp16:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int16)
-                        else:
-                            dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
-                                -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
-                            dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
-                                -1, 1).cpu().numpy().astype(np.int)
-
-                        dstore_idx += shape[0]
+                    if args.sample_break_mode == "none":
+                        assert shape[0] == args.tokens_per_sample or ex_i == len(t)-1, "shape error"
+                    if dstore_idx + shape[0] > dstore_size:
+                        shape = [dstore_size - dstore_idx]
+                        hypo['dstore_keys'] = hypo['dstore_keys'][:shape[0]]
+                        logger.warning("exceed offset at sample " + str(i))
+                    if args.dstore_fp16:
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float16)
                     else:
-                        print('Skipping this one with shape', shape)
+                        dstore_keys[dstore_idx:shape[0]+dstore_idx] = hypo['dstore_keys'].view(
+                            -1, args.decoder_embed_dim).cpu().numpy().astype(np.float32)
+                    if args.dstore_fp16 and len(task.target_dictionary) < 2 ** 15:
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
+                            -1, 1).cpu().numpy().astype(np.int16)
+                    else:
+                        dstore_vals[dstore_idx:shape[0]+dstore_idx] = hypo['tokens'].view(
+                            -1, 1).cpu().numpy().astype(np.int32)
+
+                    dstore_idx += shape[0]
 
                 sample_id = sample['id'][i]
 
                 tokens = hypo['tokens']
                 tgt_len = tokens.numel()
                 pos_scores = hypo['positional_scores'].float()
+                knn_recall = hypo['knn_recall']
 
                 if args.add_bos_token:
                     assert hypo['tokens'][0].item() == task.target_dictionary.bos()
@@ -243,7 +284,10 @@ def main(parsed_args):
                             w = w[:-bpe_len]
                             is_bpe = True
                         else:
-                            word_prob.append((w, pos_scores[i].item()))
+                            if args.output_knn_recall:
+                                word_prob.append((w, pos_scores[i].item(), knn_recall[i]))
+                            else:
+                                word_prob.append((w, pos_scores[i].item()))
 
                             next_prob = None
                             ind = i + 1
@@ -257,18 +301,26 @@ def main(parsed_args):
                             is_bpe = False
                             w = ''
                     if args.output_word_probs:
-                        logger.info(
-                            str(int(sample_id)) + " "
-                            + ('\t'.join('{} [{:2f}]'.format(x[0], x[1]) for x in word_prob))
-                        )
+                        if args.output_knn_recall:
+                            logger.info(
+                                str(int(sample_id)) + " "
+                                + ('\t'.join('{} [{:2f}] [{}]'.format(x[0], x[1], x[2]) for x in word_prob))
+                            )
+                        else:
+                            logger.info(
+                                str(int(sample_id)) + " "
+                                + ('\t'.join('{} [{:2f}]'.format(x[0], x[1]) for x in word_prob))
+                            )
 
             wps_meter.update(sample['ntokens'])
             t.log({'wps': round(wps_meter.avg)})
 
+            cur_avg_nll_loss = -score_sum / count / math.log(2)  # convert to base 2
+            cur_ppl = 2 ** cur_avg_nll_loss
+            t.log({'ppl': cur_ppl})
+
     if args.save_knnlm_dstore:
-        print("dstore_idx", dstore_idx, "final shape", shape)
-        print("Keys", dstore_keys.shape, dstore_keys.dtype)
-        print("Vals", dstore_vals.shape, dstore_vals.dtype)
+        logger.info(f"Saved {dstore_idx} data to {save_dir}")
 
     avg_nll_loss = -score_sum / count / math.log(2)  # convert to base 2
     logger.info('Evaluated {} tokens in {:.1f}s ({:.2f} tokens/s)'.format(

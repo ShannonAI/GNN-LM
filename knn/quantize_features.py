@@ -72,8 +72,19 @@ def main():
             # co.useFloat16 = True
             # quantizer = faiss.index_cpu_to_gpu(res, 0, quantizer, co)
     else:
-        LOGGING.info(f"Train quantized codes on first {chunk_size} features")
-        train_features = np.array(ds.keys[: chunk_size])
+        LOGGING.info(f"Train quantized codes on first {chunk_size} features from")
+
+        # We found that training on first n samples woiuld cause quantizer perform badly on later samples, so
+        # we split keys into multiple parts, and gather first n samples from each part.
+        train_features = np.zeros([min(chunk_size, total_tokens), hidden_size])
+        num_parts = 100
+        offset = 0
+        for p_idx in tqdm(range(num_parts), "Gathering training features"):
+            global_offset = total_tokens // num_parts * p_idx
+            part_size = train_features.shape[0] // num_parts if p_idx < num_parts-1 else train_features.shape[0] - train_features.shape[0] // num_parts * (num_parts-1)
+            train_features[offset: offset + part_size] = ds.keys[global_offset: global_offset + part_size]
+            offset += part_size
+
         if args.norm:
             norm = np.sqrt(np.sum(train_features ** 2, axis=-1, keepdims=True))
             train_features /= norm
@@ -107,33 +118,31 @@ def main():
     start = 0
     total_error = 0
     pbar = tqdm(total=total_tokens, desc="Computing codes")
+    bsz = 8192
     while start < total_tokens:
-        end = min(total_tokens, start + chunk_size)
-        x = np.array(ds.keys[start: end].astype(np.float32))
-        bsz = 8192
-        intra_offset = 0
-        while intra_offset < end - start:
-            batch_x = x[intra_offset: intra_offset + bsz]
-            if args.norm:
-                norm = np.sqrt(np.sum(batch_x ** 2, axis=-1, keepdims=True))
-                batch_x /= norm
+        end = min(total_tokens, start + bsz)
+        batch_x = np.array(ds.keys[start: end].astype(np.float32))
 
-            # codes = quantizer.sa_encode(batch_x)
-            batch_x = torch.from_numpy(batch_x)
-            if args.use_gpu:
-                batch_x = batch_x.cuda()
-            codes = quantizer.encode(batch_x)
+        if args.norm:
+            norm = np.sqrt(np.sum(batch_x ** 2, axis=-1, keepdims=True))
+            batch_x /= norm
 
-            if args.compute_error:
-                # x2 = quantizer.sa_decode(codes)
-                x2 = quantizer.decode(codes)
-                # compute reconstruction error
-                avg_relative_error = (((batch_x - x2)**2).sum() / (batch_x ** 2).sum()).item()
-                pbar.set_postfix({"L2 error": avg_relative_error})
-                total_error += avg_relative_error * batch_x.shape[0]
-            quantized_codes[start+intra_offset: start+intra_offset+batch_x.shape[0]] = codes.cpu()
-            intra_offset += batch_x.shape[0]
-            pbar.update(batch_x.shape[0])
+        # codes = quantizer.sa_encode(batch_x)
+        batch_x = torch.from_numpy(batch_x)
+        if args.use_gpu:
+            batch_x = batch_x.cuda()
+        codes = quantizer.encode(batch_x)
+
+        if args.compute_error:
+            x2 = quantizer.decode(codes)
+            # compute reconstruction error
+            avg_relative_error = (((batch_x - x2)**2).sum() / (batch_x ** 2).sum()).item()
+            pbar.set_postfix({"L2 error": avg_relative_error})
+            total_error += avg_relative_error * batch_x.shape[0]
+
+        quantized_codes[start: end] = codes.cpu()
+        pbar.update(batch_x.shape[0])
+
         start = end
 
     if args.compute_error:

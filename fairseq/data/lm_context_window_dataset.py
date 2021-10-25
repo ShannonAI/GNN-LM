@@ -37,12 +37,12 @@ class LMContextWindowDataset(FairseqDataset):
 
         bsz, tsz = sample['net_input']['src_tokens'].shape
         start_idxs = [0] * bsz
-        toks = sample['net_input']['src_tokens']
+        toks = sample['net_input']['src_tokens']  # [bsz, tsz]
         lengths = sample['net_input']['src_lengths']
         tgt = sample['target']
         new_toks = np.empty([bsz, tsz + self.context_window], dtype=np.int64)
         new_tgt = np.full([bsz, tsz + self.context_window], pad, dtype=np.int64)
-        sample_lens = toks.ne(pad).long().sum(dim=1).cpu()
+        sample_lens = toks.ne(pad).long().sum(dim=1).cpu()  # [bsz]
         for i in range(bsz):
             sample_len = sample_lens[i]
             extra = len(self.prev_tokens) + sample_len - max_sample_len

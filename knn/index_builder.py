@@ -63,12 +63,13 @@ class IndexBuilder:
             return f"OPQ64_{self.dstore.hidden_size},IVF{clusters},PQ64"  # we use 64 here since faiss does not support >64 in gpu mode
         return f"OPQ64_{self.dstore.hidden_size},IVF{clusters}_HNSW32,PQ64"
 
-    def build(self, index_type: str, chunk_size=1000000, seed=None, start: int = 0, overwrite=False):
+    def build(self, index_type: str, chunk_size=1000000, seed=None,
+              start: int = 0, overwrite=False, max_train=1000000):
         """build faiss index"""
         if index_type == "auto":
             index_type = self.get_auto_index_type()
 
-        self.train(index_type=index_type, max_num=chunk_size, seed=seed, overwrite=overwrite)
+        self.train(index_type=index_type, max_num=max_train, seed=seed, overwrite=overwrite)
         LOGGING.info('Adding Keys')
         pretrained_file = self.trained_file
         if os.path.exists(self.faiss_file) and not overwrite:

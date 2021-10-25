@@ -96,14 +96,15 @@ class DataStore:
             info["hidden_size"],
             info.get("vocab_size", None),
             info.get("dstore_fp16", False),
-            info.get("val_size", 2),
+            info.get("val_size", 1),
         )
         return cls(dstore_size=dstore_size, hidden_size=hidden_size, dstore_dir=dstore_dir, dstore_fp16=dstore_fp16,
                    vocab_size=vocab_size, no_load_keys=no_load_keys, mode=mode, use_memory=use_memory, val_size=val_size)
 
 
 if __name__ == '__main__':
-    dstore_dir = "/data/yuxian/datasets/wikitext-103/data-bin/test_dstore"
+    # dstore_dir = "/data/yuxian/datasets/wikitext-103/data-bin/test_dstore"
+    dstore_dir = "/userhome/yuxian/data/lm/one-billion/data-bin-256/test_dstore"
     ds = DataStore.from_pretrained(dstore_dir)
     print(ds.info)
     print(ds.keys[-10:])

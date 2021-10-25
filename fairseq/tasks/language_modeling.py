@@ -3,30 +3,35 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import logging
-import os
+from typing import Dict
 
 import numpy as np
+import pyarrow.plasma as plasma
 import torch
 
-from fairseq import utils
 from fairseq.data import (
     data_utils,
     Dictionary,
     IdDataset,
     MonolingualDataset,
+    GraphMonolingualDataset,
     NestedDictionaryDataset,
     NumelDataset,
     PadDataset,
     PrependTokenDataset,
     StripTokenDataset,
     TokenBlockDataset,
-    TransformEosDataset,
+    GraphTokenBlockDataset,
+    MmapDataset,
     TruncateDataset,
     TruncatedDictionary,
 )
+# from fairseq.data.plasma_utils import PlasmaArray
+from fairseq.data.new_plasma_utils import PlasmaArray
 from fairseq.tasks import FairseqTask, register_task
-
+from knn.path_utils import *
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +109,7 @@ class LanguageModelingTask(FairseqTask):
                             help='File containing the index built using faiss for knn')
         parser.add_argument('--lmbda', default=0.0, type=float,
                             help='controls interpolation with knn, 0.0 = no knn')
-        parser.add_argument('--knn-sim-func', default=None, type=str,
+        parser.add_argument('--knn-sim-func', default="do_not_recomp_ip", type=str,
                             help='similarity function to use for knns')
         parser.add_argument('--faiss-metric-type', default='l2', type=str,
                             help='the distance metric for faiss')
@@ -114,7 +119,38 @@ class LanguageModelingTask(FairseqTask):
                             help='if true, datastore items are saved in fp16 and int16')
         parser.add_argument('--move-dstore-to-mem', default=False, action='store_true',
                             help='move the keys and values for knn to memory')
-        ## knnlm related items
+        parser.add_argument('--load-neighbor', default=False, action='store_true',
+                            help='if true, load neighbor information')
+        # knnlm related items
+
+        # graph related items
+        parser.add_argument('--graph', default=False, action='store_true',
+                            help='if true, use graph dataset/label')
+        parser.add_argument('--neighbor-context', default='(2, 2)', metavar="B",
+                            help='neighbor context, left window size and right window size')
+        parser.add_argument('--use-precompute-feat', default=False, action='store_true',
+                            help='if true, use pre-computed feat instead of online computed feature'
+                                 'this is usefule when context in training is smaller than origin version')
+        parser.add_argument('--invalid-neighbor-context', default=1536, type=int,
+                            help='invalid neighbor context, e.g. we do not want the neighbor with ground truth be '
+                                 'in the origin sentence during training.')
+        parser.add_argument('--gcn-k', default=1024, type=int,
+                            help='number of nearest neighbors used for gcn')
+        parser.add_argument('--dstore-dir', type=str, default=None,
+                            help='File where the knnlm datastore is saved')
+        parser.add_argument('--index-file', type=str, default=None,
+                            help='File containing the index built using faiss for knn')
+        parser.add_argument("--plasma_path", type=str, default="",
+                            help="load quantized feature to memory")
+        parser.add_argument('--gcn-context-window', default=0, type=int,
+                            help='context window used for evaluating')
+        parser.add_argument('--intra-context', default=0, type=int,
+                            help='intra context length')
+        parser.add_argument('--deprecated', default=False, action='store_true',
+                            help='if true, use deprecated graph build')
+        parser.add_argument('--reinit-nfeat', default=False, action='store_true',
+                            help='if true, use word embedding as neighbor node feature instead of cached '
+                                 'representation')
         # fmt: on
 
     def __init__(self, args, dictionary, output_dictionary=None, targets=None):
@@ -126,6 +162,8 @@ class LanguageModelingTask(FairseqTask):
         if targets is None:
             targets = ["future"]
         self.targets = targets
+        self.graph = args.graph
+        self.plasma_client = plasma.connect(self.args.plasma_path) if self.args.plasma_path else None
 
     @classmethod
     def setup_task(cls, args, **kwargs):
@@ -198,31 +236,87 @@ class LanguageModelingTask(FairseqTask):
         if self.args.truncate_sequence:
             dataset = TruncateDataset(dataset, self.args.tokens_per_sample)
 
-        dataset = TokenBlockDataset(
-            dataset,
-            dataset.sizes,
-            self.args.tokens_per_sample,
-            pad=self.dictionary.pad(),
-            eos=self.dictionary.eos(),
-            break_mode=self.args.sample_break_mode,
-            include_targets=True,
-        )
+        if not self.graph:
+            dataset = TokenBlockDataset(
+                dataset,
+                dataset.sizes,
+                self.args.tokens_per_sample,
+                pad=self.dictionary.pad(),
+                eos=self.dictionary.eos(),
+                break_mode=self.args.sample_break_mode,
+                include_targets=True,
+            )
 
-        add_eos_for_other_targets = (
-            self.args.sample_break_mode is not None
-            and self.args.sample_break_mode != "none"
-        )
+            add_eos_for_other_targets = (
+                self.args.sample_break_mode is not None
+                and self.args.sample_break_mode != "none"
+            )
 
-        self.datasets[split] = MonolingualDataset(
-            dataset,
-            dataset.sizes,
-            self.dictionary,
-            self.output_dictionary,
-            add_eos_for_other_targets=add_eos_for_other_targets,
-            shuffle=False if hasattr(self.args, 'lm_eval') and self.args.lm_eval else True,
-            targets=self.targets,
-            add_bos_token=self.args.add_bos_token,
-        )
+            self.datasets[split] = MonolingualDataset(
+                dataset,
+                dataset.sizes,
+                self.dictionary,
+                self.output_dictionary,
+                add_eos_for_other_targets=add_eos_for_other_targets,
+                shuffle=False if hasattr(self.args, 'lm_eval') and self.args.lm_eval else True,
+                targets=self.targets,
+                add_bos_token=self.args.add_bos_token,
+            )
+        else:
+            num_tokens = sum(dataset.sizes)
+            neighbor_info = json.load(open(os.path.join(dstore_path(data_path, "train"), "info.json")))
+            info = json.load(open(os.path.join(dstore_path(data_path, split), "info.json")))
+            num_neighbor_tokens = neighbor_info["dstore_size"]
+            precompute_feat_dtype = np.float16 if info["dstore_fp16"] else np.float32
+            precompute_feat_size = info["hidden_size"]
+            neighbor_tokens_dtype = np.int16 if info["dstore_fp16"] and len(self.dictionary) < 2**15 else np.int32
+            if not self.args.reinit_nfeat:
+                quant_nfeat_path = quantized_feature_path(data_path, "train")
+                quantize_neighbor_feat = (self.load_plasma_array(feat_file=quant_nfeat_path, subset="train") or
+                                          PlasmaArray(np.load(quantized_feature_path(data_path, "train"))))
+            else:
+                quantize_neighbor_feat = None
+            dataset = GraphTokenBlockDataset(
+                dataset,
+                dataset.sizes,
+                self.args.tokens_per_sample,
+                pad=self.dictionary.pad(),
+                eos=self.dictionary.eos(),
+                break_mode=self.args.sample_break_mode,
+                include_targets=True,
+
+                neighbor_offsets=MmapDataset(neighbor_path(data_dir=data_path, mode=split, k=self.args.gcn_k),
+                                             dtype=np.int64, shape=(num_tokens, self.args.gcn_k), warmup=False),
+                
+                neighbor_tokens=MmapDataset(value_path(data_dir=data_path, mode="train"),
+                                            dtype=neighbor_tokens_dtype,
+                                            shape=(num_neighbor_tokens, 1), warmup=False),
+                quant_neighbor_feats=quantize_neighbor_feat,
+                neighbor_context=eval(self.args.neighbor_context),
+                precompute_feats=None if not self.args.use_precompute_feat else MmapDataset(
+                    feature_path(data_dir=data_path, mode=split),
+                    dtype=precompute_feat_dtype, shape=(num_tokens, precompute_feat_size), warmup=False),
+                invalid_neighbor_context=self.args.invalid_neighbor_context if split == "train" else 0,
+                context_window=self.args.gcn_context_window,
+                intra_context=self.args.intra_context,
+                deprecated=self.args.deprecated
+            )
+
+            add_eos_for_other_targets = (
+                self.args.sample_break_mode is not None
+                and self.args.sample_break_mode != "none"
+            )
+
+            self.datasets[split] = GraphMonolingualDataset(
+                dataset,
+                dataset.sizes,
+                self.dictionary,
+                self.output_dictionary,
+                add_eos_for_other_targets=add_eos_for_other_targets,
+                shuffle=False if hasattr(self.args, 'lm_eval') and self.args.lm_eval else True,
+                targets=self.targets,
+                add_bos_token=self.args.add_bos_token,
+            )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, **kwargs):
         """
@@ -292,3 +386,26 @@ class LanguageModelingTask(FairseqTask):
         """Return the :class:`~fairseq.data.Dictionary` for the language
         model."""
         return self.output_dictionary
+
+    def load_plasma_array(self, feat_file, subset="train"):
+        if not self.plasma_client:
+            return
+        plasma_key = PlasmaArray.generate_object_id(feat_file, suffix=subset)
+        if self.plasma_client.contains(plasma_key):
+            logger.info(f"using existed array of {feat_file}{subset} in plasma server at {self.args.plasma_path}")
+            return PlasmaArray(array=None, obj_id=plasma_key, path=self.args.plasma_path)
+
+    def get_large_arrays(self, split="train", epoch=1, combine=False) -> Dict[str, np.array]:
+        """get large arrays used in dataset, keys are the corresponding file path"""
+
+        paths = self.args.data.split(os.pathsep)
+        assert len(paths) > 0
+
+        data_path = paths[epoch % len(paths)]
+
+        quant_nfeat_path = quantized_feature_path(data_path, "train")
+        quantize_neighbor_feat = np.load(quantized_feature_path(data_path, "train"))
+
+        path2array = {quant_nfeat_path: quantize_neighbor_feat}
+
+        return path2array

@@ -25,8 +25,15 @@ from fairseq.modules import (
     TransformerDecoderLayer,
     TransformerEncoderLayer,
 )
-from torch import Tensor
 
+from fairseq.models.hgt import HGT
+import dgl
+from torch import Tensor
+import logging
+from knn.pq_wrapper import TorchPQCodec
+import faiss
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -655,6 +662,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         else:
             self.layernorm_embedding = None
 
+        if args.add_bias:
+            self.register_buffer('xl_bias', torch.zeros([len(dictionary)]))  # for transformer-xl compatibility
+        else:
+            self.xl_bias = None
+
     def forward(
         self,
         prev_output_tokens,
@@ -715,7 +727,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 heads at this layer (default: last layer).
             alignment_heads (int, optional): only average alignment over
                 this many heads (default: all heads).
-
         Returns:
             tuple:
                 - the decoder's features of shape `(batch, tgt_len, embed_dim)`
@@ -834,9 +845,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if self.adaptive_softmax is None:
             # project back to size of vocabulary
             if self.share_input_output_embed:
-                return F.linear(features, self.embed_tokens.weight)
+                return F.linear(features, self.embed_tokens.weight) + self.xl_bias if self.xl_bias is not None else F.linear(features, self.embed_tokens.weight)
             else:
-                return F.linear(features, self.embed_out)
+                return F.linear(features, self.embed_out) + self.xl_bias if self.xl_bias is not None else F.linear(features, self.embed_out)
         else:
             return features
 
@@ -894,6 +905,184 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             state_dict[version_key] = torch.Tensor([1])
 
         return state_dict
+
+
+class TokenGraphTransformerDecoder(TransformerDecoder):
+    def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
+        super(TokenGraphTransformerDecoder, self).__init__(args, dictionary, embed_tokens, no_encoder_attn)
+        self.hgt_etypes = [
+            ('tgt', 'intra', 'tgt'),
+            ('ntgt', 'inter', 'tgt'),
+            # ('tgt', 'inter', 'ntgt'),
+            ('ntgt', 'intra', 'ntgt'),
+        ]
+        etype2idx = {"intra": 0, "inter": 1}
+        ntype2idx = {"tgt": 0, "ntgt": 1}
+
+        self.hgt_decoder = HGT(
+            ntype2idx=ntype2idx,
+            etype2idx=etype2idx,
+            in_dim=args.decoder_embed_dim,
+            hidden_dim=args.decoder_gcn_dim,
+            out_dim=args.decoder_embed_dim,
+            n_layers=args.graph_layer,
+            n_heads=args.decoder_attention_heads,
+            dropout=args.dropout,
+            two_stream=False,
+            attn_drop=args.attention_dropout
+        )
+        self.eos_idx = dictionary.eos_index
+        self.num_classes = len(dictionary)
+        if args.quantizer_path:
+            self.tgt_quantizer = TorchPQCodec(index=faiss.read_index(args.quantizer_path))
+        else:
+            self.tgt_quantizer = None
+        self.short_cut = args.short_cut
+        self.orig_prob_ratio = args.orig_prob_ratio
+
+    def forward(
+        self,
+        prev_output_tokens,
+        encoder_out: Optional[EncoderOut] = None,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+        features_only: bool = False,
+        alignment_layer: Optional[int] = None,
+        alignment_heads: Optional[int] = None,
+        src_lengths: Optional[Any] = None,
+        return_all_hiddens: bool = False,
+        graph : dgl.DGLHeteroGraph = None
+    ):
+        """
+        Args:
+            prev_output_tokens (LongTensor): previous decoder outputs of shape
+                `(batch, tgt_len)`, for teacher forcing
+            encoder_out (optional): output from the encoder, used for
+                encoder-side attention
+            incremental_state (dict): dictionary used for storing state during
+                :ref:`Incremental decoding`
+            features_only (bool, optional): only return features without
+                applying output layer (default: False).
+            graph: graph information used by graph-lm dataset
+        Returns:
+            tuple:
+                - the decoder's output of shape `(batch, tgt_len, vocab)`
+                - a dictionary with any model-specific outputs
+        """
+        bsz, tgt_len = prev_output_tokens.size()
+
+        # use pre-compute feats
+        if "h" in graph.nodes["tgt"].data:  # use precompute feature
+            x = graph.nodes["tgt"].data["h"].view(bsz, tgt_len, -1)  # todo: fix padding cases
+            extra = {"inner_states": [x.transpose(0, 1)]}
+        else:
+            # extract origin decoder features
+            x, extra = self.extract_features(
+                prev_output_tokens,
+                encoder_out=encoder_out,
+                incremental_state=incremental_state,
+                alignment_layer=alignment_layer,
+                alignment_heads=alignment_heads,
+            )
+
+        if self.orig_prob_ratio > 0:
+            orig_x = self.output_layer(x).clone()
+            # Note: when we use adaptive-softmax, the output is feature instead of logits
+            if self.adaptive_softmax is None:
+                orig_prob = torch.softmax(orig_x, dim=-1)
+
+        # extract graph-decoder features
+        if not self.short_cut:
+            x = self.extract_graph_features(x, prev_output_tokens, graph, encoder_out, incremental_state)
+
+        extra["gcn_feat"] = x.transpose(0, 1)  # [seq_len, batch, vocab]
+
+        cls_logits = self.output_layer(x)
+        if self.orig_prob_ratio > 0:
+            if self.adaptive_softmax is None:
+                cls_logits = torch.log(self.orig_prob_ratio * orig_prob + (1-self.orig_prob_ratio) * torch.softmax(cls_logits, dim=-1))
+            else:
+                extra["orig_x"] = orig_x
+                extra["orig_ratio"] = self.orig_prob_ratio
+
+        if features_only:
+            return x, extra
+        return cls_logits, extra
+
+    def extract_graph_features(
+        self,
+        tgt_features: torch.FloatTensor,
+        prev_output_tokens: torch.LongTensor,
+        graph,
+        encoder_out: EncoderOut = None,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,  # todo support it faster
+    ):
+        """
+        Args:
+            tgt_features: [bsz, tgt_len, h]  in teacher forcing; [bsz, 1, h] in incremental decoding
+            prev_output_tokens: [bsz, tgt_len]
+        Returns:
+            hgl features: [bsz, seq_len, h]
+        """
+        bsz, seq_len, h = tgt_features.size()
+
+        assert encoder_out is None and incremental_state is None, "only support lm"
+
+        graph_tgt_features = tgt_features.view(-1, self.embed_dim)
+        if "h" in graph.nodes["tgt"].data:  # use pre-compute feature
+            graph_tgt_features = graph.nodes["tgt"].data["h"]
+
+        with graph.local_scope():
+            etypes = list(set(self.hgt_etypes) & set(graph.canonical_etypes))
+            if len(etypes) != len(self.hgt_etypes):
+                diff = [etype for etype in self.hgt_etypes if etype not in etypes]
+                logger.warning(f"input graph have etypes: {graph.canonical_etypes}, which does not contain"
+                               f"all etypes in self.hgt_etypes: {diff}")
+
+            if "h" in graph.nodes["ntgt"].data:
+                ntgt_feat = graph.nodes["ntgt"].data["h"]
+                if self.tgt_quantizer is not None and ntgt_feat.dtype == torch.uint8:
+                    ntgt_feat = self.tgt_quantizer.decode(ntgt_feat)
+                    graph.nodes["ntgt"].data["h"] = ntgt_feat
+            else:
+                ntgt_feat = self.embed_tokens(graph.nodes["ntgt"].data["labels"])
+                graph.nodes["ntgt"].data["h"] = ntgt_feat
+
+            hgl_features: Dict[str, torch.Tensor] = self.hgt_decoder(graph, etypes=etypes,
+                                                                     features={"tgt": graph_tgt_features},
+                                                                     incremental_state=incremental_state)
+        return hgl_features["tgt"].view(bsz, seq_len, -1)
+
+    @staticmethod
+    def combinetow_probs(p1, p2, p1_coeff):
+        combine_probs = torch.stack([p1, p2], dim=0)
+        coeffs = torch.ones_like(combine_probs)
+        coeffs[0] = math.log(p1_coeff)
+        coeffs[1] = math.log(1 - p1_coeff)
+        curr_prob = torch.logsumexp(combine_probs + coeffs, dim=0)
+        return curr_prob
+
+    def get_normalized_probs(self, net_output, log_probs, sample):
+        """Get normalized probabilities (or log probs) from a net's output."""
+
+        if hasattr(self, "adaptive_softmax") and self.adaptive_softmax is not None:
+            if sample is not None:
+                assert "target" in sample
+                target = sample["target"]
+            else:
+                target = None
+            out = self.adaptive_softmax.get_log_prob(net_output[0], target=target)
+            # weight average
+            if "orig_x" in net_output[1]:
+                orig_logits = self.adaptive_softmax.get_log_prob(net_output[1]["orig_x"], target=target)
+                out = self.combinetow_probs(orig_logits, out, self.orig_prob_ratio)
+
+            return out.exp_() if not log_probs else out
+
+        logits = net_output[0]
+        if log_probs:
+            return utils.log_softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
+        else:
+            return utils.softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
 
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):

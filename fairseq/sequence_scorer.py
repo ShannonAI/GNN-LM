@@ -10,6 +10,7 @@ import time
 
 from fairseq import utils
 from fairseq.data import Dictionary
+from knn.knn_model import KNNModel
 
 
 class SequenceScorer(object):
@@ -27,6 +28,7 @@ class SequenceScorer(object):
     def generate(self, models, sample, **kwargs):
         """Score a batch of translations."""
         net_input = sample['net_input']
+        temperature = kwargs.get("temperature", 1.0)
 
         def batch_for_softmax(dec_out, target):
             # assumes decoder_out[0] is the only thing needed (may not be correct for future models!)
@@ -51,10 +53,16 @@ class SequenceScorer(object):
             return probs
 
         def combine_knn_and_vocab_probs(knn_p, vocab_p, coeff):
-            combine_probs = torch.stack([vocab_p, knn_p], dim=0)
+            combine_probs = torch.stack([vocab_p, knn_p], dim=0)  # [2, bsz, seq_len]
             coeffs = torch.ones_like(combine_probs)
-            coeffs[0] = np.log(1 - coeff)
-            coeffs[1] = np.log(coeff)
+            if isinstance(coeff, float):
+                coeffs[0] = np.log(1 - coeff)
+                coeffs[1] = np.log(coeff)
+            else:
+                assert isinstance(coeff, torch.Tensor)
+                assert coeff.shape == knn_p.shape
+                coeffs[0] = torch.log(1 - coeff)
+                coeffs[1] = torch.log(coeff)
             curr_prob = torch.logsumexp(combine_probs + coeffs, dim=0)
 
             return curr_prob
@@ -91,24 +99,41 @@ class SequenceScorer(object):
 
             probs = probs.view(sample['target'].shape)
 
-            if 'knn_dstore' in kwargs:
-                dstore = kwargs['knn_dstore']
+            if 'knn_dstore' in kwargs and self.args.lmbda > 0.0:
+                knn_model: KNNModel = kwargs['knn_dstore']
                 # TxBxC
-                queries = bd[1][self.args.knn_keytype]
+                queries = bd[1][self.args.knn_keytype] if self.args.knn_keytype in bd[1] else bd[1]["inner_states"][
+                    -1]  # todo(yuxian): 这里不能用bd！！！！！当batched不止一个的时候会报错！！
+                seq_len, bsz, hidden = queries.shape
                 if len(models) != 1:
                     raise ValueError('Only knn *log* probs are supported.')
+                epsilon = 1e-10
+                # knn_probs = knn_model.get_knn_prob(queries.contiguous().view(-1, hidden))  # [seq_len*bsz, V]
+                # knn_probs = torch.log(knn_probs+epsilon).view(seq_len, bsz, -1).permute(1, 0, 2)  # [bsz, seq_len, V]
+                # knn_probs = gather_target_probs(knn_probs, orig_target.to(knn_probs.device)).view(sample['target'].shape)
+                # seq_len * bsz
+                knn_probs, recall = knn_model.get_knn_prob(
+                    queries.contiguous().view(-1, hidden),
+                    targets=orig_target.permute(0, 1).view(seq_len * bsz),
+                    t=temperature,
+                    return_recall=True
+                )
+                knn_probs = torch.log(knn_probs + epsilon).view(seq_len, bsz).transpose(0, 1)  # [bsz, seq_len]
+                recall = recall.view(seq_len, bsz).transpose(0, 1)
+                # print(knn_probs)
+                # print(probs)
 
-                yhat_knn_prob = dstore.get_knn_log_prob(
-                        queries,
-                        orig_target.permute(1, 0),
-                        pad_idx=self.pad)
-                yhat_knn_prob = yhat_knn_prob.permute(1, 0, 2).squeeze(-1)
-                if self.args.fp16:
-                    yhat_knn_prob = yhat_knn_prob.half()
-                    probs = probs.half()
+                # yhat_knn_prob = knn_model.get_knn_log_prob(
+                #         queries,
+                #         orig_target.permute(1, 0),
+                #         pad_idx=self.pad)
+                # yhat_knn_prob = yhat_knn_prob.permute(1, 0, 2).squeeze(-1)
+                # if self.args.fp16:
+                #     yhat_knn_prob = yhat_knn_prob.half()
+                #     probs = probs.half()
 
                 probs = combine_knn_and_vocab_probs(
-                            yhat_knn_prob, probs, self.args.lmbda)
+                    knn_probs, probs, self.args.lmbda)
 
             if avg_probs is None:
                 avg_probs = probs
@@ -150,12 +175,20 @@ class SequenceScorer(object):
                     alignment = None
             else:
                 avg_attn_i = alignment = None
+
+            # remove padding
+            mask = sample['target'][i, start_idxs[i]:].ne(self.pad)
+            dstore_feature = decoder_out[1][self.args.knn_keytype] if self.args.knn_keytype in decoder_out[1] else \
+                decoder_out[1]["inner_states"][-1]
+            dstore_feature = dstore_feature[start_idxs[i]:, i, :][mask]
+
             hypos.append([{
                 'tokens': ref,
                 'score': score_i,
                 'attention': avg_attn_i,
                 'alignment': alignment,
                 'positional_scores': avg_probs_i,
-                'dstore_keys': decoder_out[1][self.args.knn_keytype][start_idxs[i]:,i,:] if self.args.save_knnlm_dstore else None,
+                'dstore_keys': dstore_feature,
+                'knn_recall': recall[i, start_idxs[i]:][mask] if 'knn_dstore' in kwargs and self.args.lmbda > 0.0 else None
             }])
         return hypos

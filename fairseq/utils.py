@@ -22,6 +22,8 @@ from fairseq.modules import gelu, gelu_accurate
 from fairseq.modules.multihead_attention import MultiheadAttention
 from torch import Tensor
 
+from dgl import DGLGraph
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ def apply_to_sample(f, sample):
     def _apply(x):
         if torch.is_tensor(x):
             return f(x)
+        if isinstance(x, DGLGraph):
+            return f(x)
         elif isinstance(x, dict):
             return {key: _apply(value) for key, value in x.items()}
         elif isinstance(x, list):
@@ -55,9 +59,10 @@ def apply_to_sample(f, sample):
     return _apply(sample)
 
 
-def move_to_cuda(sample):
+def move_to_cuda(sample, device=None):
+    device = device or torch.cuda.current_device()
     def _move_to_cuda(tensor):
-        return tensor.cuda()
+        return tensor.to(device)
 
     return apply_to_sample(_move_to_cuda, sample)
 

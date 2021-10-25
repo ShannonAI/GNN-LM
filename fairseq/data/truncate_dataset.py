@@ -29,3 +29,28 @@ class TruncateDataset(BaseWrapperDataset):
 
     def __len__(self):
         return len(self.dataset)
+
+
+class TruncDataset(BaseWrapperDataset):
+    """Select first n item of a dataset"""
+    def __init__(self, dataset, first=0):
+        super().__init__(dataset)
+        self.first = len(dataset) if first == 0 else min(len(dataset), first)
+        self.dataset = dataset
+
+    def __getitem__(self, index):
+        return self.dataset[index]
+
+    def collater(self, samples):
+        return self.dataset.collater(samples)
+
+    def ordered_indices(self):
+        """Return an ordered list of indices. Batches will be constructed based
+        on this order."""
+        return np.arange(len(self))
+
+    def __getattr__(self, item):
+        return getattr(self.dataset, item)
+
+    def __len__(self):
+        return self.first

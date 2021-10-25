@@ -34,7 +34,6 @@ def vis_token_knn(data_dir, subset="train", k=5, display_k=3, metric="cosine",
         fairseq_dataset_path(data_dir, subset), dictionary
     )
 
-
     src_sent_offsets = np.cumsum(dataset.sizes)
     src_sent_offsets = np.insert(src_sent_offsets, 0, 0)
     token_num = src_sent_offsets[-1]
@@ -50,7 +49,7 @@ def vis_token_knn(data_dir, subset="train", k=5, display_k=3, metric="cosine",
     while True:
         try:
             bpe_symbol = "@@ "
-            sent_idx = int(input(f"sent id(0-{token_num}): ").strip())
+            sent_idx = int(input(f"sent id(0-{len(dataset)}): ").strip())
             # sent_idx = int(input(f"token offset(0-{token_num}): ").strip())
             sent_token_ids = dataset[sent_idx][: 128]
             sent_offset = src_sent_offsets[sent_idx]
@@ -101,8 +100,11 @@ if __name__ == '__main__':
     vis_token_knn(
         # data_dir="/data/yuxian/datasets/wikitext-103/data-bin",
         data_dir="/userhome/yuxian/data/lm/wiki-103/data-bin",
+        # data_dir="/userhome/yuxian/data/lm/one-billion/data-bin-256",
+        # data_dir="/data/yuxian/wiki103-yunnao/data-bin",
+        # data_dir="/userhome/yuxian/data/lm/enwik8/data-bin",
         subset="test",
-        k=32,
+        k=128,
         metric="cosine",
-        display_k=1,
+        display_k=3,
     )

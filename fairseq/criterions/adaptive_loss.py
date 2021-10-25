@@ -6,6 +6,7 @@
 import math
 
 import torch.nn.functional as F
+import torch
 
 from fairseq import metrics, utils
 from fairseq.criterions import FairseqCriterion, register_criterion
@@ -48,6 +49,14 @@ class AdaptiveLoss(FairseqCriterion):
         bsz = orig_target.size(0)
 
         logits, target = adaptive_softmax(net_output[0], orig_target)
+
+        # weight average
+        if "orig_x" in net_output[1]:
+            alpha = net_output[1]["orig_ratio"]
+            orig_logits, orig_target = adaptive_softmax(net_output[1]["orig_x"], orig_target)
+            prob = alpha * F.softmax(orig_logits, dim=-1) + (1-alpha) * F.softmax(logits, dim=-1)
+            logits = torch.log(prob)
+
         assert len(target) == len(logits)
 
         loss = net_output[0].new(1 if reduce else bsz).zero_()

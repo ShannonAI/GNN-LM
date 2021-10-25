@@ -5,6 +5,7 @@
 
 import numpy as np
 import torch
+import dgl
 
 from . import data_utils, FairseqDataset
 
@@ -33,7 +34,7 @@ def collate(samples, pad_idx, eos_idx):
     else:
         target = src_tokens
 
-    return {
+    out = {
         'id': torch.LongTensor([s['id'] for s in samples]),
         'nsentences': len(samples),
         'ntokens': sum(len(s['source']) for s in samples),
@@ -45,6 +46,11 @@ def collate(samples, pad_idx, eos_idx):
         },
         'target': target,
     }
+
+    if "start_idx" in samples[0]:
+        start_indices = torch.stack([s["start_idx"] for s in samples])
+        out["start_indices"] = start_indices
+    return out
 
 
 class MonolingualDataset(FairseqDataset):
@@ -198,3 +204,63 @@ class MonolingualDataset(FairseqDataset):
 
     def prefetch(self, indices):
         self.dataset.prefetch(indices)
+
+
+class GraphMonolingualDataset(MonolingualDataset):
+    """Monolingual Dataset with graph"""
+    def __init__(self, dataset, sizes, src_vocab, tgt_vocab, add_eos_for_other_targets, shuffle,
+                 targets=None, add_bos_token=False):
+        super(GraphMonolingualDataset, self).__init__(dataset, sizes, src_vocab, tgt_vocab, add_eos_for_other_targets,
+                                                      shuffle, targets, add_bos_token)
+
+        assert self.targets == ["future"] and not self.add_eos_for_other_targets
+        assert not self.add_bos_token
+
+    def __getitem__(self, index):
+        # *future_target* is the original sentence
+        # *source* is shifted right by 1 (maybe left-padded with eos)
+        # *past_target* is shifted right by 2 (left-padded as needed)
+        #
+        # Left-to-right language models should condition on *source* and
+        # predict *future_target*.
+        # Right-to-left language models should condition on *source* and
+        # predict *past_target*.
+        source, future_target, past_target, graph, start_idx = self.dataset[index]
+        source, target = self._make_source_target(source, future_target, past_target)
+
+        # source, target = self._maybe_add_bos(source, target)
+        return {'id': index, 'source': source, 'target': target, 'graph': graph, 'start_idx': start_idx}
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def collater(self, samples):
+        """Merge a list of samples to form a mini-batch.
+
+        Args:
+            samples (List[dict]): samples to collate
+
+        Returns:
+            dict: a mini-batch with the following keys:
+
+                - `id` (LongTensor): example IDs in the original input order
+                - `ntokens` (int): total number of tokens in the batch
+                - `net_input` (dict): the input to the Model, containing keys:
+
+                  - `src_tokens` (LongTensor): a padded 2D Tensor of tokens in
+                    the source sentence of shape `(bsz, src_len)`. Padding will
+                    appear on the right.
+
+                - `target` (LongTensor): a padded 2D Tensor of tokens in the
+                  target sentence of shape `(bsz, tgt_len)`. Padding will appear
+                  on the right.
+        """
+        if len(samples) == 0:
+            return {}
+        batch = collate(samples, self.vocab.pad(), self.vocab.eos())
+        batch['net_input']["graph"] = dgl.batch([s["graph"] for s in samples])
+        return batch
+
+    def ordered_indices(self):
+        # NOTE we don't shuffle the data to retain access to the previous dataset elements
+        return np.arange(len(self.dataset))

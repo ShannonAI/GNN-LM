@@ -17,7 +17,6 @@ class KNN_Dstore(object):
         self.dstore_fp16 = args.dstore_fp16
         self.index = self.setup_faiss(args)
 
-
     def setup_faiss(self, args):
         if not args.dstore_filename:
             raise ValueError('Cannot build a datastore without the data.')
