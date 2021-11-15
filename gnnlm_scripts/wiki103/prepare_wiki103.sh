@@ -32,21 +32,21 @@ for ((i=0;i<${#URLS[@]};++i)); do
 done
 
 # preprocess
-TEXT=/userhome/yuxian/data/lm/wiki-103  # yunnao
-TEXT=/data/nfsdata2/nlp_application/datasets/corpus/english/wikitext-103  # gpu11
+TEXT=/userhome/yuxian/data/lm/wiki-103
+DATA_BIN=$TEXT/data-bin
 fairseq-preprocess \
     --only-source \
     --trainpref $TEXT/wiki.train.tokens \
     --validpref $TEXT/wiki.valid.tokens \
     --testpref $TEXT/wiki.test.tokens \
-    --destdir /data/nfsdata2/nlp_application/datasets/corpus/english/wikitext-103/data-bin \
+    --destdir $DATA_BIN \
     --workers 12
 
+# download pretrained model
+wget https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_wiki103.v2.tar.bz2
+
 # train
-#DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"
-#MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline"
-DATA_BIN="/data/nfsdata2/nlp_application/datasets/corpus/english/wikitext-103/data-bin"
-MODEL_DIR="/data/yuxian/train_logs/lm/wiki-103/fairseq_baseline"
+MODEL_DIR="/data/yuxian/train_logs/lm/wiki-103/fairseq_baseline"  # path to your pretrained model
 mkdir -p $MODEL_DIR
 LOG=$MODEL_DIR/log.txt
 fairseq-train --task language_modeling \
@@ -60,10 +60,7 @@ fairseq-train --task language_modeling \
     >$LOG 2>&1 & tail -f $LOG
 
 # eval
-DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"
 MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline"
-#DATA_BIN="/data/nfsdata2/nlp_application/datasets/corpus/english/wikitext-103/data-bin"
-#MODEL_DIR="/data/yuxian/train_logs/lm/wiki-103/urvashi"
 LOG=$MODEL_DIR/ppl.txt
 CUDA_VISIBLE_DEVICES=1 fairseq-eval-lm $DATA_BIN \
     --path $MODEL_DIR/checkpoint_best.pt \
