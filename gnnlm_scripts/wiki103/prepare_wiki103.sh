@@ -31,36 +31,32 @@ for ((i=0;i<${#URLS[@]};++i)); do
     fi
 done
 
+
+
+# download pretrained model
+MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline_20211115"
+mkdir -p $MODEL_DIR
+cd $MODEL_DIR
+wget https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_wiki103.v2.tar.bz2
+tar -xvf adaptive_lm_wiki103.v2.tar.bz2
+mv adaptive_lm_wiki103.v2/* ./
+mv model.pt checkpoint_best.pt
+
+
 # preprocess
 TEXT=/userhome/yuxian/data/lm/wiki-103
-DATA_BIN=$TEXT/data-bin
+DATA_BIN=$TEXT/data-bin-new
 fairseq-preprocess \
-    --only-source \
+    --only-source  \
+    --srcdict $MODEL_DIR/dict.txt \
     --trainpref $TEXT/wiki.train.tokens \
     --validpref $TEXT/wiki.valid.tokens \
     --testpref $TEXT/wiki.test.tokens \
     --destdir $DATA_BIN \
     --workers 12
 
-# download pretrained model
-wget https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_wiki103.v2.tar.bz2
-
-# train
-MODEL_DIR="/data/yuxian/train_logs/lm/wiki-103/fairseq_baseline"  # path to your pretrained model
-mkdir -p $MODEL_DIR
-LOG=$MODEL_DIR/log.txt
-fairseq-train --task language_modeling \
-    $DATA_BIN \
-    --save-dir $MODEL_DIR \
-    --arch transformer_lm_wiki103 \
-    --max-update 286000 --max-lr 1.0 --t-mult 2 --lr-period-updates 270000 --lr-scheduler cosine --lr-shrink 0.75 \
-    --warmup-updates 16000 --warmup-init-lr 1e-07 --min-lr 1e-09 --optimizer nag --lr 0.0001 --clip-norm 0.1 \
-    --criterion adaptive_loss --max-tokens 3072 --update-freq 3 --tokens-per-sample 3072 --seed 1 --fp16 \
-    --sample-break-mode none --skip-invalid-size-inputs-valid-test --ddp-backend=no_c10d \
-    >$LOG 2>&1 & tail -f $LOG
 
 # eval
-MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline"
 LOG=$MODEL_DIR/ppl.txt
 CUDA_VISIBLE_DEVICES=1 fairseq-eval-lm $DATA_BIN \
     --path $MODEL_DIR/checkpoint_best.pt \

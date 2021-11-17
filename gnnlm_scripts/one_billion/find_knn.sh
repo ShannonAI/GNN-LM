@@ -28,3 +28,18 @@ CUDA_VISIBLE_DEVICES=1 python knn/quantize_features.py \
 --chunk-size 10000000 \
 --index $index --code-size 128 \
 --compute-error  --use-gpu
+
+# convert pretrained ckpt to graph-ckpt
+PRETRAINED=""
+NEW_CKPT=""
+QUANTIZER=""
+python fairseq_cli/convert_ckpt.py \
+--ckpt $PRETRAINED \
+--out $NEW_CKPT \
+--quantizer $QUANTIZER
+
+
+# (Optional) eval quantizer
+CUDA_VISIBLE_DEVICES=0 python knn/eval_quantizer.py \
+--data-dir $DATA_BIN  \
+--use-gpu

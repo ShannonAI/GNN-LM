@@ -223,8 +223,8 @@ class GraphTokenBlockDataset(TokenBlockDataset):
     ):
         super(GraphTokenBlockDataset, self).__init__(dataset, sizes, block_size, pad, eos,
                                                      break_mode, include_targets, document_sep_len)
-        self.neighbor_offsets = neighbor_offsets  # [corpus_len, k]
-        self.neighbor_tokens = neighbor_tokens  # [neighbor_corpus_len, 1]
+        self.neighbor_offsets = neighbor_offsets
+        self.neighbor_tokens = neighbor_tokens
         cum_sizes = np.cumsum(sizes)
         self.cum_sizes = np.insert(cum_sizes, 0, 0)
         self.k = self.neighbor_offsets.shape[-1]
@@ -414,7 +414,6 @@ class GraphTokenBlockDataset(TokenBlockDataset):
     def deprecated_build_graph(self, source: torch.Tensor, offsets: np.array, neighbor_idxs:np.array, target: torch.Tensor):
         """
         build dgl graph
-        NOTE: this graph use ntgt that found by t+1 tgt, which is not valid in inference
         Args:
             source: source tensor
             offsets: np.array

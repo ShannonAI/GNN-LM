@@ -1,21 +1,21 @@
-DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"
+DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"  # path to preprocessed data
 QUANTIZER=$DATA_BIN/quantizer
 #plasma_store -m 100000000000 -s /tmp/plasma
 ## activate plasma server
-
-python activate_plasma_server.py \
-  $DATA_BIN
+#python activate_plasma_server.py \
+#  $DATA_BIN
 
 n=1024
 k=32
 c=1
 lr=2e-5
-PRETRAINED="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline/checkpoint_best_quantize.pt"
-MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/0907_gcn_bidirect_noleak_n${n}_k${k}_adam_lr$lr"
+#PRETRAINED="/userhome/yuxian/train_logs/lm/wiki-103/fairseq_baseline/checkpoint_best_quantize.pt"
+PRETRAINED="/userhome/yuxian/train_logs/lm/wiki-103/qt_baseline_new/checkpoint_best.pt"
+MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/1116_gcn_bidirect_noleak_n${n}_k${k}_adam_lr$lr"
 LOG=$MODEL_DIR/log.txt
 mkdir -p $MODEL_DIR
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 # todo change lr; gcn dropout
+export CUDA_VISIBLE_DEVICES=0,1 # todo change lr; gcn dropout
 
 # Stage 1: train with gcn-k=32
 fairseq-train --task language_modeling \
@@ -82,14 +82,14 @@ CUDA_VISIBLE_DEVICES=2, fairseq-eval-lm $DATA_BIN \
     --path $MODEL_DIR/$MODEL_NAME \
     --graph --neighbor-context $c  --gcn-k $k --use-precompute-feat \
     --sample-break-mode none --max-tokens $n --tokens-per-sample $n \
-     --softmax-batch 3072 \
+    --softmax-batch 3072 \
     --model-overrides "{'orig_prob_ratio': $alpha, 'quantizer_path': '${QUANTIZER}', 'max_target_positions': $n, 'add_bias': False}" \
     --gcn-context-window $w \
     --gen-subset $subset  --knn-keytype "gcn_feat" \
     > $LOG 2>&1 & tail -f $LOG
 
 
-# extract gcn feature
+# (Optional) extract gcn feature
 DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"
 #MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/0709_gcn_bidirect_noleak"
 MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/0712_gcn_bidirect_noleak_n256_k128_adam_lr2e-5"
@@ -117,14 +117,13 @@ done
 
 
 
-# eval with knn  todo use new extracted feature
+# eval with knn
 DATA_BIN="/userhome/yuxian/data/lm/wiki-103/data-bin"
 MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/0712_gcn_bidirect_noleak_n256_k128_adam_lr2e-5"
-#MODEL_DIR="/userhome/yuxian/train_logs/lm/wiki-103/0823_gcn_bidirect_noleak_n256_k128_adam_lr2e-5"
-DSTORE=$DATA_BIN/train_dstore-gcn_feat
-#DSTORE=$DATA_BIN/train_dstore
+#DSTORE=$DATA_BIN/train_dstore-gcn_feat  # gcn-key
+DSTORE=$DATA_BIN/train_dstore  # transformer-key
 INDEX=$DSTORE/faiss_store.cosine
-QUANTIZER=$DATA_BIN/quantizer.64
+QUANTIZER=$DATA_BIN/quantizer
 subset="test"
 c=2
 k=128

@@ -12,7 +12,7 @@ tail -n 306688 valid_and_test.txt > test.txt
 
 
 # truncate dataset to max-len 256
-TEXT=/userhome/yuxian/data/lm/one-billion
+TEXT=/userhome/yuxian/data/lm/one-billion  # path to your downloaded data
 for file in "valid.txt" "test.txt" "train.txt" ; do
   python remove_too_long_sentence.py \
   --input-file $TEXT/$file \

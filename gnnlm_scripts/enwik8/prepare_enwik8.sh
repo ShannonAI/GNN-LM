@@ -13,9 +13,8 @@ fi
 
 
 # preprocess
-#TEXT=/userhome/yuxian/data/lm/enwik8  # yunnao
-TEXT=/data/nfsdata2/nlp_application/datasets/corpus/english/enwik8  # gpu11
-DATA_BIN=$TEXT/data-bin  # yunnao
+TEXT=/userhome/yuxian/data/lm/enwik8  # text dataset
+DATA_BIN=$TEXT/data-bin
 fairseq-preprocess \
     --only-source \
     --trainpref $TEXT/train.txt \
@@ -29,8 +28,7 @@ fairseq-preprocess \
 # Since transformer-XL is trained on latest fairseq, which is incompatible with knnlm,
 # we firstly train a fake transformer model, then update its last layer's weight with pretrained transformer-xl
 # and we do not do forward of transformer again in train/inference, but use the precompute features.
-TEXT=/userhome/yuxian/data/lm/enwik8
-DATA_BIN=$TEXT/data-bin  # yunnao
+DATA_BIN=$TEXT/data-bin
 MODEL_DIR="/userhome/yuxian/train_logs/lm/enwik8/fairseq_fake"
 mkdir -p $MODEL_DIR
 CUDA_VISIBLE_DEVICES=0, fairseq-train --task language_modeling \
