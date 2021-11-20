@@ -1,7 +1,18 @@
 # GNN-LM
 ## Introduction
-This repo contains code for paper [GNN-LM: Language Modeling based on Global Contexts via GNN](https://arxiv.org/abs/2110.08743),
-and is a fork of the [knnlm](https://github.com/urvashik/knnlm) repository from commit-id `fb6b50e48136b2c201f4768005474dc90e7791df`.
+The repository contains the code for the recent research advances at [Shannon.AI](http://www.shannonai.com). 
+
+**[GNN-LM: Language Modeling based on Global Contexts via GNN](https://arxiv.org/pdf/2110.08743.pdf)** <br>
+Yuxian Meng, Shi Zong, Xiaoya Li, Xiaofei Sun, Tianwei Zhang, Fei Wu, Jiwei Li<br>
+If you find this repository helpful, please cite the following:
+```tex 
+  @article{meng2021gnn,
+  title={GNN-LM: Language Modeling based on Global Contexts via GNN},
+  author={Meng, Yuxian and Zong, Shi and Li, Xiaoya and Sun, Xiaofei and Zhang, Tianwei and Wu, Fei and Li, Jiwei},
+  journal={arXiv preprint arXiv:2110.08743},
+  year={2021}
+}```
+
 
 ## Results
 * Wiki103-Text
@@ -55,3 +66,6 @@ If you are working with a remote cluster, please note that we use [memmaps](http
 ## TODOs
 - [ ] Scripts for Enwik8
 - [ ] Scripts for One Billion Dataset
+
+## Acknowledgements
+For KNN baselines, we fork [knnlm](https://github.com/urvashik/knnlm) repository from commit-id `fb6b50e48136b2c201f4768005474dc90e7791df`, which we wish to acknowledge. 
