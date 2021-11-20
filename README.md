@@ -6,12 +6,13 @@ The repository contains the code for the recent research advances at [Shannon.AI
 Yuxian Meng, Shi Zong, Xiaoya Li, Xiaofei Sun, Tianwei Zhang, Fei Wu, Jiwei Li<br>
 If you find this repository helpful, please cite the following:
 ```tex 
-  @article{meng2021gnn,
+ @article{meng2021gnn,
   title={GNN-LM: Language Modeling based on Global Contexts via GNN},
   author={Meng, Yuxian and Zong, Shi and Li, Xiaoya and Sun, Xiaofei and Zhang, Tianwei and Wu, Fei and Li, Jiwei},
   journal={arXiv preprint arXiv:2110.08743},
   year={2021}
-}```
+}
+```
 
 
 ## Results
