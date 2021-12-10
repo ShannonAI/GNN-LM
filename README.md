@@ -28,9 +28,9 @@ If you find this repository helpful, please cite the following:
 
 | Model | # Params | Test ppl |
 |:------------|:-----------:|:-----------:|
-| base LM | 247M | 18.7 | 
-| + GNN | 274M | 16.8 |
-| + GNN + KNN | 274M | 14.8 |
+| base LM | 1.03B | 23.0 | 
+| + GNN | 1.05B | 22.7 |
+| + GNN + KNN | 1.05B | 22.5 |
 
 * EnWiki8
 
